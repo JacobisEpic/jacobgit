@@ -1,1 +1,1 @@
-# jacobgit
+jacobgit/ is the VCS (version control system) metadata root
