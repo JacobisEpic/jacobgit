@@ -5,8 +5,10 @@ import os
 import sys
 import hashlib
 import struct
+import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
+from collections import defaultdict
 
 @dataclass
 class IndexEntry:
@@ -27,149 +29,218 @@ def write_object(obj_type: str, data: bytes, repo_path: Optional[str] = None) ->
     if not os.path.exists(obj_path):
         with open(obj_path, 'wb') as f:
             f.write(full)
-    
     return sha1
 
-def read_index(repo_path=None) -> list[IndexEntry]:
-    repo_path = repo_path or os.getcwd()
-    index_path = os.path.join(repo_path, ".jacobgit", "index")
+def read_index(repo_path: Optional[str] = None) -> list[IndexEntry]:
+    repo = repo_path or os.getcwd()
+    index_path = os.path.join(repo, ".jacobgit", "index")
     entries: list[IndexEntry] = []
     try:
         with open(index_path, 'rb') as f:
-            # Header (12 bytes))
             raw = f.read(12)
             if len(raw) < 12:
-                raise ValueError("Invalid index file format")
+                raise ValueError("Invalid index header")
             magic = raw[:4]
-            version, count = struct.unpack('<II', raw[4:12]) # little-endian unsigned int
+            version, count = struct.unpack('<II', raw[4:12])
             if magic != b"JIDX":
-                raise ValueError("Invalid index file format")
+                raise ValueError("Bad index magic")
             if version > 0:
                 raise ValueError(f"Unsupported index version {version}")
-            
-            # Entries
             for _ in range(count):
-                # read path_len (H -> 2 bytes Unsigned short), mode (I -> 4 bytes Unsigned int), mtime (I -> 4 bytes Unsigned int)
-                entry_header = f.read(2 + 4 + 4)
-                if len(entry_header) < 10:
-                    raise ValueError("Invalid entry header format")
-                path_len, mode, mtime = struct.unpack('<HII', entry_header)
-
-                # read sha1 (20 bytes)
+                hdr = f.read(10)  # 2 + 4 + 4
+                if len(hdr) < 10:
+                    raise ValueError("Truncated index entry header")
+                path_len, mode, mtime = struct.unpack('<HII', hdr)
                 sha_bytes = f.read(20)
                 if len(sha_bytes) < 20:
-                    raise ValueError("Invalid SHA1 format")
+                    raise ValueError("Truncated SHA in index")
                 sha1 = sha_bytes.hex()
-
-                # read path (variable length)
                 path_bytes = f.read(path_len)
                 if len(path_bytes) < path_len:
-                    raise ValueError("Index path truncated")
+                    raise ValueError("Truncated path in index")
                 path = path_bytes.decode('utf-8')
-
                 entries.append(IndexEntry(path, mode, mtime, sha1))
     except FileNotFoundError:
         return []
-
     return entries
 
-def write_index(entries, repo_path=None):
+def write_index(entries: list[IndexEntry], repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     index_path = os.path.join(repo, ".jacobgit", "index")
-    # Open the index file in binary write mode
     with open(index_path, 'wb') as f:
-        # Write the header
         f.write(b"JIDX")
-        f.write(struct.pack("<I", 0))  # version
-        f.write(struct.pack("<I", len(entries)))  # count
-
-        # Write each entry
-        for entry in entries:
-            path_bytes = entry.path.encode('utf-8')
-            path_len = len(path_bytes)
-            # Write the entry header
-            f.write(struct.pack('<HII', path_len, entry.mode, entry.mtime))
-            # Write the SHA1 hash
-            f.write(bytes.fromhex(entry.sha1))
-            # Write the path
+        f.write(struct.pack("<I", 0))               # version
+        f.write(struct.pack("<I", len(entries)))    # count
+        for e in entries:
+            path_bytes = e.path.encode('utf-8')
+            f.write(struct.pack('<HII', len(path_bytes), e.mode, e.mtime))
+            f.write(bytes.fromhex(e.sha1))
             f.write(path_bytes)
 
-def cmd_add(paths, repo_path=None):
+def cmd_add(paths: list[str], repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     entries = read_index(repo)
-
     for path in paths:
         st = os.stat(path)
         mode = st.st_mode
         mtime = int(st.st_mtime)
-
-        with open(path, "rb") as f:
+        with open(path, 'rb') as f:
             data = f.read()
         sha1 = write_object("blob", data, repo)
-
-        # remove old entry, then append the new one
         entries = [e for e in entries if e.path != path]
-        entries.append(IndexEntry(path=path,
-                                  mode=mode,
-                                  mtime=mtime,
-                                  sha1=sha1))
-
+        entries.append(IndexEntry(path, mode, mtime, sha1))
     write_index(entries, repo)
     print(f"Added {len(paths)} file(s) to the index.")
+
+def write_tree(repo_path: Optional[str] = None) -> str:
+    repo = repo_path or os.getcwd()
+    entries = read_index(repo)
+    tree_map = defaultdict(list)
+    for e in entries:
+        parent, name = os.path.split(e.path)
+        tree_map[parent].append((name, e))
+    def build_tree(dir_path: str) -> str:
+        items = []
+        for name, entry in sorted(tree_map.get(dir_path, [])):
+            full = os.path.join(dir_path, name)
+            if full in tree_map:
+                sha = build_tree(full)
+                mode = 0o040000
+            else:
+                sha = entry.sha1
+                mode = entry.mode
+            header = f"{mode:o} {name}\0".encode()
+            items.append(header + bytes.fromhex(sha))
+        tree_data = b"".join(items)
+        return write_object("tree", tree_data, repo)
+    return build_tree("")
+
+def get_head_ref(repo_path: Optional[str] = None) -> Optional[str]:
+    repo = repo_path or os.getcwd()
+    head_file = os.path.join(repo, ".jacobgit", "HEAD")
+    try:
+        content = open(head_file, 'r').read().strip()
+    except FileNotFoundError:
+        return None
+    if content.startswith("ref: "):
+        return content[5:]
+    return None  # detached HEAD
+
+def read_ref(repo_path: Optional[str] = None, ref: Optional[str] = None) -> Optional[str]:
+    repo = repo_path or os.getcwd()
+    if ref:
+        path = os.path.join(repo, ".jacobgit", ref)
+        try:
+            return open(path, 'r').read().strip()
+        except FileNotFoundError:
+            return None
+    head_ref = get_head_ref(repo)
+    if head_ref:
+        return read_ref(repo, head_ref)
+    # HEAD contains raw SHA?
+    head_file = os.path.join(repo, ".jacobgit", "HEAD")
+    try:
+        content = open(head_file, 'r').read().strip()
+        if not content.startswith("ref: "):
+            return content
+    except FileNotFoundError:
+        pass
+    return None
+
+def read_object(sha: str, repo_path: Optional[str] = None) -> Tuple[str, bytes]:
+    repo = repo_path or os.getcwd()
+    obj_path = os.path.join(repo, ".jacobgit", "objects", sha)
+    with open(obj_path, 'rb') as f:
+        full = f.read()
+    header, raw = full.split(b'\0', 1)
+    obj_type = header.split(b' ', 1)[0].decode('utf-8')
+    return obj_type, raw
+
+def cmd_commit(message: str, repo_path: Optional[str] = None):
+    repo = repo_path or os.getcwd()
+    tree_sha = write_tree(repo)
+    head_ref = get_head_ref(repo) or "refs/heads/master"
+    parent_sha = read_ref(repo, head_ref)
+    ts = int(time.time())
+    author = f"Jacob Chin <you@example.com> {ts} +0000"
+    lines = [f"tree {tree_sha}"]
+    if parent_sha:
+        lines.append(f"parent {parent_sha}")
+    lines += [
+        f"author {author}",
+        f"committer {author}",
+        "",
+        message
+    ]
+    data = "\n".join(lines).encode('utf-8')
+    commit_sha = write_object("commit", data, repo)
+    ref_path = os.path.join(repo, ".jacobgit", head_ref)
+    os.makedirs(os.path.dirname(ref_path), exist_ok=True)
+    with open(ref_path, 'w') as f:
+        f.write(commit_sha)
+    branch = head_ref.split('/')[-1]
+    print(f"[{branch} {commit_sha[:7]}] {message}")
+
+def cmd_log(repo_path: Optional[str] = None):
+    repo = repo_path or os.getcwd()
+    head_ref = get_head_ref(repo)
+    sha = read_ref(repo, head_ref) if head_ref else read_ref(repo)
+    while sha:
+        obj_type, raw = read_object(sha, repo)
+        if obj_type != "commit":
+            break
+        meta, body = raw.split(b"\n\n", 1)
+        msg = body.decode('utf-8').strip()
+        print(f"commit {sha}")
+        print(f"    {msg}\n")
+        parent_line = next((l for l in meta.decode().splitlines() if l.startswith("parent ")), None)
+        sha = parent_line.split()[1] if parent_line else None
+
+def cmd_init(repo_path: Optional[str] = None):
+    repo = repo_path or os.getcwd()
+    jacobgit_dir = os.path.join(repo, ".jacobgit")
+    if os.path.exists(jacobgit_dir):
+        print(f"jacobgit repository already exists at {jacobgit_dir}")
+        return
+    os.makedirs(os.path.join(jacobgit_dir, "objects"), exist_ok=True)
+    os.makedirs(os.path.join(jacobgit_dir, "refs", "heads"), exist_ok=True)
+    with open(os.path.join(jacobgit_dir, "HEAD"), 'w') as f:
+        f.write("ref: refs/heads/master\n")
+    open(os.path.join(jacobgit_dir, "refs", "heads", "master"), 'w').close()
+    print(f"Initialized empty jacobgit repository in {jacobgit_dir}")
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: jacobgit <command> [<args>]")
         print("Commands:")
-        print("  init            Initialize a new repo")
-        print("  add <file>…     Stage one or more files")
-
+        print("  init                 Initialize a new repository")
+        print("  add <file>…          Stage one or more files")
+        print("  write-tree           Write tree objects from the index")
+        print("  commit <message>     Commit staged changes")
+        print("  log                  Show commit history")
         sys.exit(1)
-    
-    command = sys.argv[1]
 
-    if command == "init":
+    cmd = sys.argv[1]
+    if cmd == "init":
         cmd_init()
-    elif command == "add":
+    elif cmd == "add":
         if len(sys.argv) < 3:
-            print("Usage: python3 jacobgit.py add <file1> <file2> ...")
+            print("Usage: jacobgit add <file>…")
             sys.exit(1)
         cmd_add(sys.argv[2:])
+    elif cmd == "write-tree":
+        sha = write_tree()
+        print(f"Tree written: {sha}")
+    elif cmd == "commit":
+        if len(sys.argv) < 3:
+            print("Usage: jacobgit commit <message>")
+            sys.exit(1)
+        cmd_commit(sys.argv[2])
+    elif cmd == "log":
+        cmd_log()
     else:
-        print(f"Unknown command: {command}")
+        print(f"Unknown command: {cmd}")
         sys.exit(1)
-    
-def cmd_init():
-    print("Initializing jacobgit repository...")
-    jacobgit_dir = os.path.join(os.getcwd(), ".jacobgit") 
-    #os.getcwd() is the current working directory
-    #os.path.join() joins the current working directory with the .jacobgit directory
-    #.jacobgit is a hidden directory (on Unix-like operating systems) that will be created in the current working directory
-
-    if os.path.exists(jacobgit_dir):
-        print(f"jacobgitrepository already exists at {jacobgit_dir}")
-        return
-
-    os.makedirs(os.path.join(jacobgit_dir, "objects"), exist_ok=True)
-    os.makedirs(os.path.join(jacobgit_dir, "refs", "heads"), exist_ok=True)
-
-    with open(os.path.join(jacobgit_dir, "HEAD"), "w") as head_file:
-        head_file.write("ref: refs/heads/master\n")
-    # Create the HEAD file and write the reference to the master branch
-    # The HEAD file is a special file in Git that points to the current branch
-    # The refs/heads directory contains references to all the branches in the repository
-    # The master branch is the default branch in Git
-
-    open(os.path.join(jacobgit_dir, "refs", "heads", "master"), "w").close()
-
-    print(f"Initialized empty jacobgit repository in {jacobgit_dir}")
-    # The refs/heads/master file is created to represent the master branch
-    # The jacobgit repository is now initialized and ready to use
 
 if __name__ == "__main__":
     main()
-# The main function is called to start the program
-# Basically, this ensures that the script is run directly, not imported as a module
-# The __name__ variable is a special variable in Python that is set to "__main__" when the script is run directly
-# This allows the script to be imported as a module without executing the main function
-# The if __name__ == "__main__": block is a common Python idiom to allow or prevent parts of code from being run when the modules are imported
