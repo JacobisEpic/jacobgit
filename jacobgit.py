@@ -361,6 +361,58 @@ def cmd_diff(staged: bool = False, repo_path: Optional[str] = None):
     if not diffs:
         print("No staged changes." if staged else "No differences.")
 
+def cmd_checkout(target: str, repo_path: Optional[str] = None):
+    """
+    Checkout a branch or commit. If `target` matches a branch name in
+    .jacobgit/refs/heads, switches to that branch; otherwise treats
+    `target` as a raw commit SHA (detached HEAD).
+    """
+    import sys
+
+    repo = repo_path or os.getcwd()
+
+    # 1) Resolve target to a commit SHA and decide new HEAD content
+    branch_ref_path = os.path.join(repo, ".jacobgit", "refs", "heads", target)
+    if os.path.isfile(branch_ref_path):
+        # it's a branch
+        commit_sha = open(branch_ref_path, "r").read().strip()
+        new_head = f"ref: refs/heads/{target}"
+    else:
+        # assume raw SHA
+        commit_sha = target
+        new_head = commit_sha
+
+    # 2) Load the commit object and extract its tree SHA
+    obj_type, raw = read_object(commit_sha, repo)
+    if obj_type != "commit":
+        print(f"error: '{target}' is not a valid commit")
+        sys.exit(1)
+    tree_line = raw.split(b"\n", 1)[0]            # b"tree <sha>"
+    tree_sha = tree_line.split(b" ", 1)[1].decode() 
+
+    # 3) Build a mapping of all files in that tree
+    file_map = read_tree(tree_sha, repo)
+
+    # 4) Remove working‐tree files not in the new tree
+    for path in get_working_files(repo):
+        if path not in file_map:
+            os.remove(os.path.join(repo, path))
+
+    # 5) Write each blob from the tree back to disk
+    for path, blob_sha in file_map.items():
+        obj_type, data = read_object(blob_sha, repo)
+        full_path = os.path.join(repo, path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "wb") as f:
+            f.write(data)
+
+    # 6) Update HEAD
+    head_file = os.path.join(repo, ".jacobgit", "HEAD")
+    with open(head_file, "w") as f:
+        f.write(new_head + "\n")
+
+    print(f"Switched to {target}")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: jacobgit <command> [<args>]")
@@ -396,6 +448,11 @@ def main():
     elif cmd == "diff":
         staged = "--staged" in sys.argv
         cmd_diff(staged)
+    elif cmd == "checkout":
+        if len(sys.argv) != 3:
+            print("Usage: jacobgit checkout <branch-or-commit>")
+            sys.exit(1)
+        cmd_checkout(sys.argv[2])
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
