@@ -6,6 +6,7 @@ import sys
 import hashlib
 import struct
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class IndexEntry:
@@ -14,42 +15,19 @@ class IndexEntry:
     mtime: int
     sha1: str
 
-def hash_and_store_object(file_path, objects_dir):
-    with open(file_path, 'rb') as f:
-        data = f.read()
-    sha1 = hashlib.sha1(data).hexdigest()
-    obj_path = os.path.join(objects_dir, sha1)
-
-    if not os.path.exists(obj_path):
-        with open(obj_path, 'wb') as out:
-            out.write(data)
-    return sha1
-
-def write_object(obj_type: str, data: bytes, repo_path: str=None) -> str:
-    repo_path = repo_path or os.getcwd()
-    objects_dir = os.path.join(repo_path, ".jacobgit", "objects")
+def write_object(obj_type: str, data: bytes, repo_path: Optional[str] = None) -> str:
+    repo = repo_path or os.getcwd()
+    objects_dir = os.path.join(repo, ".jacobgit", "objects")
     os.makedirs(objects_dir, exist_ok=True)
 
-    # Create the object file
-    sha1 = hashlib.sha1(data).hexdigest()
-    obj_path = os.path.join(objects_dir, sha1)
-    
-    if not os.path.exists(obj_path):
-        with open(obj_path, 'wb') as f:
-            f.write(data)
-    
-    return sha1
-    header = f"{obj_type} {len(data)}\0".encode('utf-8')
-    full = header + data
-
-    sha1 = hashlib.sha1(full).hexdigest()
-
-    # if missing, create the objects directory
+    header = f"{obj_type} {len(data)}\0".encode()
+    full    = header + data
+    sha1    = hashlib.sha1(full).hexdigest()
     obj_path = os.path.join(objects_dir, sha1)
     if not os.path.exists(obj_path):
         with open(obj_path, 'wb') as f:
             f.write(full)
-
+    
     return sha1
 
 def read_index(repo_path=None) -> list[IndexEntry]:
@@ -67,7 +45,7 @@ def read_index(repo_path=None) -> list[IndexEntry]:
             if magic != b"JIDX":
                 raise ValueError("Invalid index file format")
             if version > 0:
-                raise ValueError("Unsupported index version {version}")
+                raise ValueError(f"Unsupported index version {version}")
             
             # Entries
             for _ in range(count):
@@ -91,7 +69,6 @@ def read_index(repo_path=None) -> list[IndexEntry]:
 
                 entries.append(IndexEntry(path, mode, mtime, sha1))
     except FileNotFoundError:
-        print("Index file not found.")
         return []
 
     return entries
@@ -120,26 +97,33 @@ def write_index(entries, repo_path=None):
 def cmd_add(paths, repo_path=None):
     repo = repo_path or os.getcwd()
     entries = read_index(repo)
-    # Check if the file exists
+
     for path in paths:
-        # stat file
         st = os.stat(path)
         mode = st.st_mode
-        mtime = st.st_mtime
+        mtime = int(st.st_mtime)
 
-        # Read file and write blob
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             data = f.read()
-        sha1 = write_object("blob", data)
+        sha1 = write_object("blob", data, repo)
 
-        entries = [entry for entry in entries if entry.path != path]
-        entries.append(IndexEntry(path, sha1, mode, mtime))
+        # remove old entry, then append the new one
+        entries = [e for e in entries if e.path != path]
+        entries.append(IndexEntry(path=path,
+                                  mode=mode,
+                                  mtime=mtime,
+                                  sha1=sha1))
+
     write_index(entries, repo)
     print(f"Added {len(paths)} file(s) to the index.")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 jacobgit.py <repository_path>")
+        print("Usage: jacobgit <command> [<args>]")
+        print("Commands:")
+        print("  init            Initialize a new repo")
+        print("  add <file>…     Stage one or more files")
+
         sys.exit(1)
     
     command = sys.argv[1]
