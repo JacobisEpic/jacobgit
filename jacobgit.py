@@ -265,7 +265,7 @@ def cmd_status(repo_path: Optional[str] = None):
     raw = None
     if head_sha:
         obj_type, raw = read_object(head_sha, repo)
-    if obj_type == "commit":
+    if obj_type == "commit" and raw is not None:
         first_line = raw.split(b"\n", 1)[0]
         tree_sha = first_line.split(b" ", 1)[1].decode()
     elif obj_type == "tree":
@@ -305,6 +305,62 @@ def cmd_status(repo_path: Optional[str] = None):
     if not (staged or modified or untracked):
         print("Nothing to commit, working tree clean.")
 
+def cmd_diff(staged: bool = False, repo_path: Optional[str] = None):
+    import os
+    import difflib
+
+    repo = repo_path or os.getcwd()
+
+    # Load index and HEAD tree if needed
+    index = {e.path: e.sha1 for e in read_index(repo)}
+    head_ref = get_head_ref(repo)
+    head_sha = read_ref(repo, head_ref) if head_ref else None
+
+    # Peel a commit down to its tree SHA
+    tree_sha = None
+    if head_sha:
+        obj_type, raw = read_object(head_sha, repo)
+        if obj_type == "commit":
+            tree_sha = raw.split(b"\n", 1)[0].split(b" ", 1)[1].decode()
+        elif obj_type == "tree":
+            tree_sha = head_sha
+
+    head_tree = read_tree(tree_sha, repo) if staged and tree_sha else {}
+
+    work_files = get_working_files(repo)
+    diffs = []
+
+    if staged:
+        # Compare index ↔ HEAD tree
+        for path, idx_sha in index.items():
+            head_sha2 = head_tree.get(path)
+            if head_sha2 and head_sha2 != idx_sha:
+                before = read_object(head_sha2, repo)[1].decode().splitlines()
+                after  = read_object(idx_sha,  repo)[1].decode().splitlines()
+                diffs.append((path, before, after))
+    else:
+        # Compare index ↔ working tree
+        for path in work_files:
+            if path in index:
+                before = read_object(index[path], repo)[1].decode().splitlines()
+                after  = open(os.path.join(repo, path)).read().splitlines()
+                if before != after:
+                    diffs.append((path, before, after))
+
+    # Print diffs
+    for path, before, after in diffs:
+        for line in difflib.unified_diff(
+            before,
+            after,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm=""
+        ):
+            print(line)
+
+    if not diffs:
+        print("No staged changes." if staged else "No differences.")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: jacobgit <command> [<args>]")
@@ -337,6 +393,9 @@ def main():
         cmd_log()
     elif cmd == "status":
         cmd_status()
+    elif cmd == "diff":
+        staged = "--staged" in sys.argv
+        cmd_diff(staged)
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
