@@ -17,6 +17,10 @@ class IndexEntry:
     mtime: int
     sha1: str
 
+def hash_blob(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("utf-8")
+    return hashlib.sha1(header + data).hexdigest()
+
 def write_object(obj_type: str, data: bytes, repo_path: Optional[str] = None) -> str:
     repo = repo_path or os.getcwd()
     objects_dir = os.path.join(repo, ".jacobgit", "objects")
@@ -147,6 +151,44 @@ def read_ref(repo_path: Optional[str] = None, ref: Optional[str] = None) -> Opti
         pass
     return None
 
+def get_working_files(repo_path: Optional[str] = None) -> list[str]:
+    repo = repo_path or os.getcwd()
+    files = []
+    for root, _, names in os.walk(repo):
+        # skip .jacobgit directory
+        if ".jacobgit" in root.split(os.sep) or ".git" in root.split(os.sep):
+            continue
+        for name in names:
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, repo)
+            files.append(rel)
+    return sorted(files)
+
+def read_tree(sha: str, repo_path: Optional[str] = None, prefix: str = "") -> dict[str, str]:
+    repo = repo_path or os.getcwd()
+    obj_type, data = read_object(sha, repo)
+    if obj_type != "tree":
+        raise ValueError(f"Expected tree object, got {obj_type}")
+    i = 0
+    result: dict[str, str] = {}
+    while i < len(data):
+        # parse "mode name\0"
+        j = data.find(b"\0", i)
+        entry = data[i:j].decode("utf-8")
+        mode_s, name = entry.split(" ", 1)
+        mode = int(mode_s, 8)
+        sha_bytes = data[j+1:j+21]
+        entry_sha = sha_bytes.hex()
+        i = j + 21
+        path = f"{prefix}/{name}" if prefix else name
+
+        # if tree, recurse; else record blob
+        if mode == 0o040000:
+            result.update(read_tree(entry_sha, repo, path))
+        else:
+            result[path] = entry_sha
+    return result
+
 def read_object(sha: str, repo_path: Optional[str] = None) -> Tuple[str, bytes]:
     repo = repo_path or os.getcwd()
     obj_path = os.path.join(repo, ".jacobgit", "objects", sha)
@@ -209,6 +251,60 @@ def cmd_init(repo_path: Optional[str] = None):
     open(os.path.join(jacobgit_dir, "refs", "heads", "master"), 'w').close()
     print(f"Initialized empty jacobgit repository in {jacobgit_dir}")
 
+def cmd_status(repo_path: Optional[str] = None):
+    repo = repo_path or os.getcwd()
+
+    # load index and HEAD tree
+    index = {e.path: e.sha1 for e in read_index(repo)}
+
+    head_ref = get_head_ref(repo)
+    head_sha = read_ref(repo, head_ref) if head_ref else None
+    # if HEAD points at a commit, extract its “tree” SHA
+    tree_sha = None
+    obj_type = None
+    raw = None
+    if head_sha:
+        obj_type, raw = read_object(head_sha, repo)
+    if obj_type == "commit":
+        first_line = raw.split(b"\n", 1)[0]
+        tree_sha = first_line.split(b" ", 1)[1].decode()
+    elif obj_type == "tree":
+        tree_sha = head_sha
+
+    head_tree = read_tree(tree_sha, repo) if tree_sha else {}
+    # get current files
+    work_files = get_working_files(repo)
+
+    staged, modified, untracked = [], [], []
+    for path in work_files:
+        data = open(os.path.join(repo, path), "rb").read()
+        work_sha = hash_blob(data)
+
+        in_index = path in index
+        in_head  = path in head_tree
+
+        # staged: in index differs from HEAD
+        if in_index and index[path] != head_tree.get(path):
+            staged.append(path)
+        # modified: in index but working copy changed
+        if in_index and work_sha != index[path]:
+            modified.append(path)
+        # untracked: not in index
+        if not in_index:
+            untracked.append(path)
+
+    if staged:
+        print("Staged changes:")
+        for p in staged: print(f"  {p}")
+    if modified:
+        print("Modified (unstaged):")
+        for p in modified: print(f"  {p}")
+    if untracked:
+        print("Untracked files:")
+        for p in untracked: print(f"  {p}")
+    if not (staged or modified or untracked):
+        print("Nothing to commit, working tree clean.")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: jacobgit <command> [<args>]")
@@ -218,6 +314,7 @@ def main():
         print("  write-tree           Write tree objects from the index")
         print("  commit <message>     Commit staged changes")
         print("  log                  Show commit history")
+        print("  status               Show staged, modified and untracked files")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -238,6 +335,8 @@ def main():
         cmd_commit(sys.argv[2])
     elif cmd == "log":
         cmd_log()
+    elif cmd == "status":
+        cmd_status()
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
