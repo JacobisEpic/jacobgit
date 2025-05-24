@@ -30,38 +30,44 @@
 
 ```sh
 # Initialize a new repository
-python [jacobgit.py](http://_vscodecontentref_/0) init
+python jacobgit.py init
 
 # Add files to the staging area
-python [jacobgit.py](http://_vscodecontentref_/1) add <file1> <file2> ...
+python jacobgit.py add <file1> <file2> ...
 
 # Commit staged changes
-python [jacobgit.py](http://_vscodecontentref_/2) commit "Commit message"
+python jacobgit.py commit "Commit message"
 
 # Show repository status
-python [jacobgit.py](http://_vscodecontentref_/3) status
+python jacobgit.py status
 
 # Show commit history
-python [jacobgit.py](http://_vscodecontentref_/4) log
+python jacobgit.py log
 
 # Create a new branch
-python [jacobgit.py](http://_vscodecontentref_/5) branch <branch-name>
+python jacobgit.py branch <branch-name>
 
 # List all branches
-python [jacobgit.py](http://_vscodecontentref_/6) branch
+python jacobgit.py branch
 
 # Delete a branch
-python [jacobgit.py](http://_vscodecontentref_/7) branch -d <branch-name>
+python jacobgit.py branch -d <branch-name>
 
 # Switch branches or checkout a commit
-python [jacobgit.py](http://_vscodecontentref_/8) checkout <branch-or-commit-sha>
+python jacobgit.py checkout <branch-name-or-commit-sha>
 
 # Show differences
-python [jacobgit.py](http://_vscodecontentref_/9) diff           # unstaged changes
-python [jacobgit.py](http://_vscodecontentref_/10) diff --staged  # staged changes
-
+python jacobgit.py diff             # Unstaged changes
+python jacobgit.py diff --staged   # Staged changes
+```
 ---
 
 ## Project Structure
-- jacobgit.py — Main implementation of the VCS logic.
-- .jacobgit/ — Internal metadata directory (objects, refs, index, HEAD).
+```sh
+jacobgit.py     # Main CLI and VCS logic
+.jacobgit/      # Internal metadata directory
+├── objects/    # Stores versioned file contents
+├── refs/       # Stores branch references
+├── index       # Staging area (index)
+└── HEAD        # Current branch or commit reference
+```
