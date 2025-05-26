@@ -259,7 +259,7 @@ def cmd_status(repo_path: Optional[str] = None):
 
     head_ref = get_head_ref(repo)
     head_sha = read_ref(repo, head_ref) if head_ref else None
-    # if HEAD points at a commit, extract its “tree” SHA
+    # if HEAD points at a commit, extract its "tree" SHA
     tree_sha = None
     obj_type = None
     raw = None
@@ -393,7 +393,7 @@ def cmd_checkout(target: str, repo_path: Optional[str] = None):
     # 3) Build a mapping of all files in that tree
     file_map = read_tree(tree_sha, repo)
 
-    # 4) Remove working‐tree files not in the new tree
+    # 4) Remove working-tree files not in the new tree
     for path in get_working_files(repo):
         if path not in file_map:
             os.remove(os.path.join(repo, path))
@@ -413,6 +413,105 @@ def cmd_checkout(target: str, repo_path: Optional[str] = None):
 
     print(f"Switched to {target}")
 
+def get_HEAD_commit(repo_path: Optional[str] = None) -> Optional[str]:
+    """Get the commit SHA that HEAD points to, whether directly or via a ref."""
+    repo = repo_path or os.getcwd()
+    head_ref = get_head_ref(repo)
+    return read_ref(repo, head_ref) if head_ref else read_ref(repo)
+
+def cmd_branch(args: list[str], repo_path: Optional[str] = None):
+    repo = repo_path or os.getcwd()
+    heads_dir = os.path.join(repo, ".jacobgit", "refs", "heads")
+
+    # Ensure the heads directory exists
+    os.makedirs(heads_dir, exist_ok=True)
+
+    # Branch deletion
+    if len(args) == 2 and args[0] == "-d":
+        name = args[1]
+        path = os.path.join(heads_dir, name)
+        if not os.path.exists(path):
+            print(f"error: branch '{name}' not found.")
+            sys.exit(1)
+        current = get_head_ref(repo)
+        if current and current.endswith(name):
+            print(f"error: cannot delete the branch '{name}' which you are currently on.")
+            sys.exit(1)
+        os.remove(path)
+        print(f"Deleted branch {name}")
+        return
+
+    # Branch creation
+    if len(args) == 1 and args[0] != "-d":
+        name = args[0]
+        path = os.path.join(heads_dir, name)
+        if os.path.exists(path):
+            print(f"error: branch '{name}' already exists.")
+            sys.exit(1)
+        # Get current commit SHA (fail if no commits)
+        commit_sha = get_HEAD_commit(repo)
+        if not commit_sha:
+            print("error: cannot create branch: no commits yet.")
+            sys.exit(1)
+
+        with open(path, 'w') as f:
+            f.write(commit_sha)
+        print(f"Created branch {name}")
+        return
+
+    # Listing branches (no args)
+    if not args:
+        current = get_head_ref(repo)
+        current = current.split('/')[-1] if current else None
+        for fn in sorted(os.listdir(heads_dir)):
+            prefix = "* " if fn == current else "  "
+            print(f"{prefix}{fn}")
+        return
+
+    # Invalid usage
+    print("Usage: jacobgit branch [<name>] | branch -d <name>")
+    sys.exit(1)
+
+def cmd_tag(args: list[str], repo_path: Optional[str] = None):
+    repo = repo_path or os.getcwd()
+    tags_dir = os.path.join(repo, ".jacobgit", "refs", "tags")
+    os.makedirs(tags_dir, exist_ok=True)
+
+    # List tags
+    if not args or (len(args) == 1 and args[0] == "-l"):
+        if not os.path.exists(tags_dir) or not os.listdir(tags_dir):
+            print("No tags exist yet.")
+            return
+        for tag in sorted(os.listdir(tags_dir)):
+            sha = open(os.path.join(tags_dir, tag)).read().strip()[:7]
+            print(f"{tag}\t{sha}")
+        return
+
+    # Create tag
+    if len(args) == 1:
+        name = args[0]
+        if name == "-l":
+            print("error: tag name required")
+            sys.exit(1)
+        path = os.path.join(tags_dir, name)
+        if os.path.exists(path):
+            print(f"error: tag '{name}' already exists.")
+            sys.exit(1)
+
+        # Get current commit SHA
+        commit_sha = get_HEAD_commit(repo)
+        if not commit_sha:
+            print("error: cannot create tag: no commits yet.")
+            sys.exit(1)
+
+        with open(path, 'w') as f:
+            f.write(commit_sha)
+        print(f"Created tag {name}")
+        return
+
+    print("Usage: jacobgit tag [-l] | tag <name>")
+    sys.exit(1)
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: jacobgit <command> [<args>]")
@@ -423,6 +522,10 @@ def main():
         print("  commit <message>     Commit staged changes")
         print("  log                  Show commit history")
         print("  status               Show staged, modified and untracked files")
+        print("  branch [<name>]      List or create branches")
+        print("  branch -d <name>     Delete a branch")
+        print("  tag [-l]            List tags")
+        print("  tag <name>          Create a tag")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -453,6 +556,10 @@ def main():
             print("Usage: jacobgit checkout <branch-or-commit>")
             sys.exit(1)
         cmd_checkout(sys.argv[2])
+    elif cmd == "branch":
+        cmd_branch(sys.argv[2:])
+    elif cmd == "tag":
+        cmd_tag(sys.argv[2:])
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
