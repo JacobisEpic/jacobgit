@@ -6,9 +6,77 @@ import sys
 import hashlib
 import struct
 import time
+import functools
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable, TypeVar, Any, Dict, List, Union
 from collections import defaultdict
+
+# Type variables for generic decorator typing
+T = TypeVar('T')
+F = TypeVar('F', bound=Callable[..., Any])
+
+def require_repo(func: F) -> F:
+    """Decorator to ensure we're in a jacobgit repository"""
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        repo = kwargs.get('repo_path') or os.getcwd()
+        jacobgit_dir = os.path.join(repo, ".jacobgit")
+        if not os.path.exists(jacobgit_dir):
+            print(f"fatal: not a jacobgit repository: {jacobgit_dir}")
+            sys.exit(1)
+        return func(*args, **kwargs)
+    return wrapper  # type: ignore
+
+def log_cmd(func: F) -> F:
+    """Decorator to log command execution with file logging"""
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        repo = kwargs.get('repo_path') or os.getcwd()
+        cmd_name = func.__name__.replace('cmd_', '')
+        log_msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] executing '{cmd_name}' command"
+        
+        # Print to console
+        print(f"debug: {log_msg}")
+        
+        # Write to log file
+        log_dir = os.path.join(repo, ".jacobgit", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "jacobgit.log")
+        
+        try:
+            with open(log_file, 'a') as f:
+                f.write(log_msg + "\n")
+            result = func(*args, **kwargs)
+            # Log success
+            success_msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] '{cmd_name}' completed successfully"
+            with open(log_file, 'a') as f:
+                f.write(success_msg + "\n")
+            return result
+        except Exception as e:
+            # Log error
+            error_msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] '{cmd_name}' failed: {str(e)}"
+            with open(log_file, 'a') as f:
+                f.write(error_msg + "\n")
+            print(f"error: command '{cmd_name}' failed: {str(e)}")
+            sys.exit(1)
+    return wrapper  # type: ignore
+
+def catch_file_errors(func: F) -> F:
+    """Decorator to handle common file operation errors"""
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except FileNotFoundError as e:
+            print(f"error: file not found: {e.filename}")
+            sys.exit(1)
+        except PermissionError as e:
+            print(f"error: permission denied: {e.filename}")
+            sys.exit(1)
+        except OSError as e:
+            print(f"error: operation failed: {str(e)}")
+            sys.exit(1)
+    return wrapper  # type: ignore
 
 @dataclass
 class IndexEntry:
@@ -21,6 +89,7 @@ def hash_blob(data: bytes) -> str:
     header = f"blob {len(data)}\0".encode("utf-8")
     return hashlib.sha1(header + data).hexdigest()
 
+@catch_file_errors
 def write_object(obj_type: str, data: bytes, repo_path: Optional[str] = None) -> str:
     repo = repo_path or os.getcwd()
     objects_dir = os.path.join(repo, ".jacobgit", "objects")
@@ -35,6 +104,7 @@ def write_object(obj_type: str, data: bytes, repo_path: Optional[str] = None) ->
             f.write(full)
     return sha1
 
+@catch_file_errors
 def read_index(repo_path: Optional[str] = None) -> list[IndexEntry]:
     repo = repo_path or os.getcwd()
     index_path = os.path.join(repo, ".jacobgit", "index")
@@ -68,6 +138,7 @@ def read_index(repo_path: Optional[str] = None) -> list[IndexEntry]:
         return []
     return entries
 
+@catch_file_errors
 def write_index(entries: list[IndexEntry], repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     index_path = os.path.join(repo, ".jacobgit", "index")
@@ -81,6 +152,8 @@ def write_index(entries: list[IndexEntry], repo_path: Optional[str] = None):
             f.write(bytes.fromhex(e.sha1))
             f.write(path_bytes)
 
+@require_repo
+@log_cmd
 def cmd_add(paths: list[str], repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     entries = read_index(repo)
@@ -198,6 +271,56 @@ def read_object(sha: str, repo_path: Optional[str] = None) -> Tuple[str, bytes]:
     obj_type = header.split(b' ', 1)[0].decode('utf-8')
     return obj_type, raw
 
+def validate_commit_message(func: F) -> F:
+    """Decorator to validate commit message format and provide guidance"""
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not args:
+            return func(*args, **kwargs)
+            
+        message = args[0]
+        if not isinstance(message, str):
+            return func(*args, **kwargs)
+
+        # Validation rules
+        lines = message.splitlines()
+        if not lines:
+            print("error: empty commit message")
+            print("\nCommit message guidelines:")
+            print("1. First line: short summary (50 chars or less)")
+            print("2. Second line: blank")
+            print("3. Following lines: detailed description")
+            print("\nExample:")
+            print("Add user authentication feature")
+            print("")
+            print("- Implement login/logout functionality")
+            print("- Add password hashing")
+            print("- Create user session management")
+            sys.exit(1)
+
+        # Check subject line length
+        if len(lines[0]) > 50:
+            print("warning: subject line should be 50 characters or less")
+            print(f"current length: {len(lines[0])} characters")
+
+        # Check if subject line starts with capital letter
+        if lines[0][0].islower():
+            print("warning: subject line should start with a capital letter")
+
+        # Check if subject line ends with a period
+        if lines[0].endswith('.'):
+            print("warning: subject line should not end with a period")
+
+        # If multi-line, check for blank second line
+        if len(lines) > 1 and lines[1].strip():
+            print("warning: second line should be blank")
+
+        return func(*args, **kwargs)
+    return wrapper  # type: ignore
+
+@require_repo
+@log_cmd
+@validate_commit_message
 def cmd_commit(message: str, repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     tree_sha = write_tree(repo)
@@ -223,6 +346,8 @@ def cmd_commit(message: str, repo_path: Optional[str] = None):
     branch = head_ref.split('/')[-1]
     print(f"[{branch} {commit_sha[:7]}] {message}")
 
+@require_repo
+@log_cmd
 def cmd_log(repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     head_ref = get_head_ref(repo)
@@ -238,6 +363,7 @@ def cmd_log(repo_path: Optional[str] = None):
         parent_line = next((l for l in meta.decode().splitlines() if l.startswith("parent ")), None)
         sha = parent_line.split()[1] if parent_line else None
 
+@log_cmd
 def cmd_init(repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     jacobgit_dir = os.path.join(repo, ".jacobgit")
@@ -251,6 +377,8 @@ def cmd_init(repo_path: Optional[str] = None):
     open(os.path.join(jacobgit_dir, "refs", "heads", "master"), 'w').close()
     print(f"Initialized empty jacobgit repository in {jacobgit_dir}")
 
+@require_repo
+@log_cmd
 def cmd_status(repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
 
@@ -305,6 +433,8 @@ def cmd_status(repo_path: Optional[str] = None):
     if not (staged or modified or untracked):
         print("Nothing to commit, working tree clean.")
 
+@require_repo
+@log_cmd
 def cmd_diff(staged: bool = False, repo_path: Optional[str] = None):
     import os
     import difflib
@@ -361,6 +491,8 @@ def cmd_diff(staged: bool = False, repo_path: Optional[str] = None):
     if not diffs:
         print("No staged changes." if staged else "No differences.")
 
+@require_repo
+@log_cmd
 def cmd_checkout(target: str, repo_path: Optional[str] = None):
     """
     Checkout a branch or commit. If `target` matches a branch name in
@@ -419,6 +551,8 @@ def get_HEAD_commit(repo_path: Optional[str] = None) -> Optional[str]:
     head_ref = get_head_ref(repo)
     return read_ref(repo, head_ref) if head_ref else read_ref(repo)
 
+@require_repo
+@log_cmd
 def cmd_branch(args: list[str], repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     heads_dir = os.path.join(repo, ".jacobgit", "refs", "heads")
@@ -472,6 +606,8 @@ def cmd_branch(args: list[str], repo_path: Optional[str] = None):
     print("Usage: jacobgit branch [<name>] | branch -d <name>")
     sys.exit(1)
 
+@require_repo
+@log_cmd
 def cmd_tag(args: list[str], repo_path: Optional[str] = None):
     repo = repo_path or os.getcwd()
     tags_dir = os.path.join(repo, ".jacobgit", "refs", "tags")
