@@ -88,8 +88,6 @@ jacobgit.py     # Main CLI and VCS logic
 └── HEAD        # Current branch or commit reference
 ```
 
-## New Features
-
 ### Commit Message Guidelines
 
 jacobgit now enforces commit message best practices:
@@ -132,11 +130,3 @@ Example log output:
 
 - Python 3.9 or higher
 - No external dependencies
-
-## Contributing
-
-Feel free to submit issues and enhancement requests!
-
-## License
-
-[Your chosen license]
